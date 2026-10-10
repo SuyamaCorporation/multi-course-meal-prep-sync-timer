@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Course Meal Preparation Sync Timer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .timeline-bar { transition: width 0.3s ease; }
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(234,179,8,0.4); }
+      70% { box-shadow: 0 0 0 10px rgba(234,179,8,0); }
+      100% { box-shadow: 0 0 0 0 rgba(234,179,8,0); }
+    }
+    .ticking { animation: pulse-ring 1.5s infinite; }
+    @keyframes done-flash {
+      0%,100% { background-color: rgb(20,83,45); }
+      50% { background-color: rgb(34,197,94); }
+    }
+    .done-flash { animation: done-flash 0.6s ease 3; }
+  </style>
+</head>
+<body class="bg-gray-950 min-h-screen text-gray-100 flex flex-col">
+  <header class="bg-gray-900 border-b border-gray-800 px-4 py-4">
+    <div class="max-w-3xl mx-auto">
+      <h1 class="text-xl font-bold tracking-tight">Multi-Course Meal Prep Sync Timer</h1>
+      <p class="text-gray-400 text-sm">Schedule all dishes to finish at the same time</p>
+    </div>
+  </header>
+
+  <main class="max-w-3xl mx-auto w-full px-4 py-6 flex flex-col gap-6">
+    <!-- Serve Time & Add Dish -->
+    <section class="bg-gray-900 rounded-2xl border border-gray-800 p-5" aria-label="Setup">
+      <div class="flex flex-col sm:flex-row gap-4 items-end">
+        <div class="flex-1">
+          <label for="serveTime" class="block text-sm text-gray-400 mb-1">Target Serve Time</label>
+          <input id="serveTime" type="time" value="18:30"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
+            aria-label="Target serve time" />
+        </div>
+        <button id="calcBtn"
+          class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-5 py-2 rounded-lg transition-colors whitespace-nowrap">
+          Calculate Schedule
+        </button>
+      </div>
+    </section>
+
+    <!-- Dish List -->
+    <section class="bg-gray-900 rounded-2xl border border-gray-800 p-5" aria-label="Dish list">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-semibold text-gray-200">Dishes</h2>
+        <button id="addDishBtn"
+          class="flex items-center gap-1 text-sm bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg transition-colors"
+          aria-label="Add a dish">
+          <span class="text-lg leading-none">+</span> Add Dish
+        </button>
+      </div>
+      <div id="dishList" class="flex flex-col gap-3" aria-label="Dish entries" aria-live="polite"></div>
+      <p id="dishLimitMsg" class="text-yellow-400 text-sm mt-2 hidden">Maximum 8 dishes reached.</p>
+    </section>
+
+    <!-- Timeline -->
+    <section id="timelineSection" class="bg-gray-900 rounded-2xl border border-gray-800 p-5 hidden" aria-label="Schedule timeline">
+      <h2 class="font-semibold text-gray-200 mb-4">Schedule Timeline</h2>
+      <div id="timelineViz" class="flex flex-col gap-3"></div>
+    </section>
+
+    <!-- Countdown Cards -->
+    <section id="countdownSection" class="hidden" aria-label="Individual countdown timers" aria-live="polite">
+      <h2 class="font-semibold text-gray-200 mb-3">Countdown Timers</h2>
+      <div id="countdownCards" class="grid grid-cols-1 sm:grid-cols-2 gap-4"></div>
+    </section>
+  </main>
+
+  <script>
+    const STORAGE_KEY = 'meal-prep-v1';
+    const COLORS = ['indigo','emerald','amber','rose','sky','violet','orange','teal'];
+    const COLOR_CLASSES = {
+      indigo: { bar:'bg-indigo-500', light:'bg-indigo-900', border:'border-indigo-700', text:'text-indigo-300', btn:'bg-indigo-700 hover:bg-indigo-600' },
+      emerald: { bar:'bg-emerald-500', light:'bg-emerald-900', border:'border-emerald-700', text:'text-emerald-300', btn:'bg-emerald-700 hover:bg-emerald-600' },
+      amber: { bar:'bg-amber-500', light:'bg-amber-900', border:'border-amber-700', text:'text-amber-300', btn:'bg-amber-700 hover:bg-amber-600' },
+      rose: { bar:'bg-rose-500', light:'bg-rose-900', border:'border-rose-700', text:'text-rose-300', btn:'bg-rose-700 hover:bg-rose-600' },
+      sky: { bar:'bg-sky-500', light:'bg-sky-900', border:'border-sky-700', text:'text-sky-300', btn:'bg-sky-700 hover:bg-sky-600' },
+      violet: { bar:'bg-violet-500', light:'bg-violet-900', border:'border-violet-700', text:'text-violet-300', btn:'bg-violet-700 hover:bg-violet-600' },
+      orange: { bar:'bg-orange-500', light:'bg-orange-900', border:'border-orange-700', text:'text-orange-300', btn:'bg-orange-700 hover:bg-orange-600' },
+      teal: { bar:'bg-teal-500', light:'bg-teal-900', border:'border-teal-700', text:'text-teal-300', btn:'bg-teal-700 hover:bg-teal-600' }
+    };
+
+    let dishes = [];
+    let schedule = [];
+    let timers = {}; // dishId -> { interval, remaining, running }
+    let nextId = 1;
+
+    function loadState() {
+      try {
+        const s = localStorage.getItem(STORAGE_KEY);
+        if (s) {
+          const d = JSON.parse(s);
+          dishes = d.dishes || [];
+          nextId = d.nextId || (dishes.length + 1);
+          const st = document.getElementById('serveTime');
+          if (d.serveTime) st.value = d.serveTime;
+        }
+      } catch(e) {}
+      if (!dishes.length) {
+        addDish('Roast Chicken', 90);
+        addDish('Roasted Vegetables', 45);
+        addDish('Rice', 20);
+      }
+    }
+
+    function saveState() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          dishes,
+          nextId,
+          serveTime: document.getElementById('serveTime').value
+        }));
+      } catch(e) {}
+    }
+
+    function addDish(name = '', cookTime = 30) {
+      if (dishes.length >= 8) return;
+      dishes.push({ id: nextId++, name, cookTime });
+      saveState();
+      renderDishList();
+    }
+
+    function removeDish(id) {
+      dishes = dishes.filter(d => d.id !== id);
+      if (timers[id]) { clearInterval(timers[id].interval); delete timers[id]; }
+      saveState();
+      renderDishList();
+      renderTimeline();
+    }
+
+    function renderDishList() {
+      const list = document.getElementById('dishList');
+      list.innerHTML = '';
+      document.getElementById('dishLimitMsg').classList.toggle('hidden', dishes.length < 8);
+      document.getElementById('addDishBtn').disabled = dishes.length >= 8;
+
+      dishes.forEach((dish, i) => {
+        const color = COLORS[i % COLORS.length];
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-3';
+        row.setAttribute('role', 'group');
+        row.setAttribute('aria-label', `Dish ${i + 1}`);
+
+        const dot = document.createElement('span');
+        dot.className = `w-3 h-3 rounded-full flex-shrink-0 ${COLOR_CLASSES[color].bar}`;
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.value = dish.name;
+        nameInput.placeholder = 'Dish name';
+        nameInput.className = 'flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-indigo-500';
+        nameInput.setAttribute('aria-label', `Dish ${i + 1} name`);
+        nameInput.addEventListener('input', () => {
+          dish.name = nameInput.value;
+          saveState();
+        });
+
+        const timeInput = document.createElement('input');
+        timeInput.type = 'number';
+        timeInput.min = '1';
+        timeInput.max = '480';
+        timeInput.value = dish.cookTime;
+        timeInput.className = 'w-20 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-indigo-500';
+        timeInput.setAttribute('aria-label', `Dish ${i + 1} cook time in minutes`);
+        timeInput.addEventListener('change', () => {
+          const v = parseInt(timeInput.value) || 30;
+          dish.cookTime = Math.max(1, Math.min(480, v));
+          timeInput.value = dish.cookTime;
+          saveState();
+        });
+
+        const minLabel = document.createElement('span');
+        minLabel.className = 'text-gray-500 text-sm flex-shrink-0';
+        minLabel.textContent = 'min';
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'text-gray-600 hover:text-red-400 transition-colors flex-shrink-0';
+        delBtn.setAttribute('aria-label', `Remove dish ${i + 1}`);
+        delBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>';
+        delBtn.addEventListener('click', () => removeDish(dish.id));
+
+        row.appendChild(dot);
+        row.appendChild(nameInput);
+        row.appendChild(timeInput);
+        row.appendChild(minLabel);
+        row.appendChild(delBtn);
+        list.appendChild(row);
+      });
+    }
+
+    function parseServeTime() {
+      const val = document.getElementById('serveTime').value;
+      if (!val) return null;
+      const [hh, mm] = val.split(':').map(Number);
+      const now = new Date();
+      const serve = new Date(now);
+      serve.setHours(hh, mm, 0, 0);
+      return serve;
+    }
+
+    function formatTime(date) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+
+    function computeSchedule() {
+      const serve = parseServeTime();
+      if (!serve) return [];
+      return dishes.map((dish, i) => {
+        const startMs = serve.getTime() - dish.cookTime * 60000;
+        const start = new Date(startMs);
+        return { ...dish, startTime: start, endTime: serve, color: COLORS[i % COLORS.length] };
+      });
+    }
+
+    function renderTimeline() {
+      const section = document.getElementById('timelineSection');
+      const viz = document.getElementById('timelineViz');
+      const countdownSection = document.getElementById('countdownSection');
+      const countdownCards = document.getElementById('countdownCards');
+
+      if (!dishes.length) { section.classList.add('hidden'); countdownSection.classList.add('hidden'); return; }
+
+      schedule = computeSchedule();
+      section.classList.remove('hidden');
+
+      // Find min start time for bar widths
+      const serve = parseServeTime();
+      const minStart = schedule.reduce((m, s) => Math.min(m, s.startTime.getTime()), Infinity);
+      const span = serve.getTime() - minStart;
+
+      viz.innerHTML = '';
+      schedule.forEach(item => {
+        const c = COLOR_CLASSES[item.color];
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex flex-col gap-1';
+
+        const label = document.createElement('div');
+        label.className = 'flex justify-between text-sm';
+        const nameEl = document.createElement('span');
+        nameEl.className = `font-medium ${c.text}`;
+        nameEl.textContent = item.name || 'Unnamed dish';
+        const timeEl = document.createElement('span');
+        timeEl.className = 'text-gray-400';
+        timeEl.textContent = `${formatTime(item.startTime)} → ${formatTime(item.endTime)} (${item.cookTime} min)`;
+        label.appendChild(nameEl);
+        label.appendChild(timeEl);
+
+        const track = document.createElement('div');
+        track.className = 'w-full bg-gray-800 rounded-full h-4 relative overflow-hidden';
+
+        const offset = (item.startTime.getTime() - minStart) / span * 100;
+        const width = (item.cookTime * 60000) / span * 100;
+
+        const fill = document.createElement('div');
+        fill.className = `h-4 rounded-full timeline-bar ${c.bar} opacity-80`;
+        fill.style.marginLeft = offset + '%';
+        fill.style.width = width + '%';
+
+        track.appendChild(fill);
+        wrapper.appendChild(label);
+        wrapper.appendChild(track);
+        viz.appendChild(wrapper);
+      });
+
+      // Countdown cards
+      countdownSection.classList.remove('hidden');
+      countdownCards.innerHTML = '';
+      schedule.forEach(item => {
+        const c = COLOR_CLASSES[item.color];
+        const card = document.createElement('div');
+        card.id = `countdown-card-${item.id}`;
+        card.className = `${c.light} border ${c.border} rounded-xl p-4 flex flex-col gap-3`;
+        card.setAttribute('role', 'region');
+        card.setAttribute('aria-label', `Countdown for ${item.name || 'dish'}`);
+
+        const h3 = document.createElement('h3');
+        h3.className = `font-semibold ${c.text} truncate`;
+        h3.textContent = item.name || 'Unnamed dish';
+
+        const info = document.createElement('p');
+        info.className = 'text-xs text-gray-400';
+        info.textContent = `${item.cookTime} min · Start at ${formatTime(item.startTime)}`;
+
+        const display = document.createElement('div');
+        display.id = `timer-display-${item.id}`;
+        display.className = 'text-3xl font-mono font-bold text-white text-center py-1';
+        display.setAttribute('aria-live', 'polite');
+        display.setAttribute('aria-label', 'Remaining time');
+        display.textContent = formatSecs(item.cookTime * 60);
+
+        const btn = document.createElement('button');
+        btn.id = `timer-btn-${item.id}`;
+        btn.className = `w-full py-2 rounded-lg text-sm font-semibold text-white transition-colors ${c.btn}`;
+        btn.textContent = 'Start Now';
+        btn.setAttribute('aria-label', `Start countdown for ${item.name || 'dish'}`);
+        btn.addEventListener('click', () => toggleTimer(item.id, item.cookTime * 60, c));
+
+        card.appendChild(h3);
+        card.appendChild(info);
+        card.appendChild(display);
+        card.appendChild(btn);
+        countdownCards.appendChild(card);
+      });
+    }
+
+    function formatSecs(secs) {
+      const s = Math.max(0, secs);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    }
+
+    function playBeep() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.5, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 1.2);
+      } catch(e) {}
+    }
+
+    function toggleTimer(id, totalSecs, c) {
+      const display = document.getElementById(`timer-display-${id}`);
+      const btn = document.getElementById(`timer-btn-${id}`);
+      const card = document.getElementById(`countdown-card-${id}`);
+
+      if (timers[id] && timers[id].running) {
+        clearInterval(timers[id].interval);
+        timers[id].running = false;
+        btn.textContent = 'Resume';
+        card.classList.remove('ticking');
+        return;
+      }
+
+      if (!timers[id]) {
+        timers[id] = { remaining: totalSecs, running: false, interval: null };
+      }
+
+      timers[id].running = true;
+      card.classList.add('ticking');
+      btn.textContent = 'Pause';
+
+      timers[id].interval = setInterval(() => {
+        timers[id].remaining--;
+        display.textContent = formatSecs(timers[id].remaining);
+        if (timers[id].remaining <= 0) {
+          clearInterval(timers[id].interval);
+          timers[id].running = false;
+          card.classList.remove('ticking');
+          card.classList.add('done-flash');
+          btn.textContent = 'Done!';
+          btn.disabled = true;
+          display.textContent = '00:00';
+          playBeep();
+          setTimeout(() => card.classList.remove('done-flash'), 2000);
+        }
+      }, 1000);
+    }
+
+    document.getElementById('addDishBtn').addEventListener('click', () => { addDish(); });
+    document.getElementById('calcBtn').addEventListener('click', () => { saveState(); renderTimeline(); });
+    document.getElementById('serveTime').addEventListener('change', saveState);
+
+    loadState();
+    renderDishList();
+    renderTimeline();
+  </script>
+</body>
+</html>
